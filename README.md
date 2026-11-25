@@ -1,16 +1,42 @@
-# React + Vite
+# Team Task Tracker
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+A mini Jira built with React, Vite and Supabase. Owners create projects,
+milestones and tasks and manage the team. Members see only their own tasks and
+can change only the status.
 
-Currently, two official plugins are available:
+## Setup
+1. Clone the repo and run `npm install`
+2. Create a Supabase project
+3. Run `supabase/schema.sql` in the Supabase SQL Editor
+4. In Supabase, Authentication, Email: turn off "Confirm email" for testing
+5. Copy `.env.example` to `.env` and fill in your project URL and anon key
+6. Run `npm run dev`
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Prompts I gave Claude and how they helped
+1. "[your first prompt, e.g. the master prompt]" - [how it helped]
+2. "[a prompt where you pasted your policies and asked why members saw no projects]" - [how it helped]
+3. "[optional third prompt]" - [how it helped]
 
-## React Compiler
+## Something I changed or fixed
+Members saw "No projects yet" even though they were saved in project_members.
+I exported my policies and found that projects_select only allowed
+owner_id = auth.uid(). I changed it to also allow project members, using a
+security definer function so the policies do not recurse.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Test results (logged in as a member)
+| Check | Result |
+|---|---|
+| I can see only my own tasks | Pass. The board shows only my task. |
+| I cannot change the priority of my task | Pass. API call returned 400, "Members can only change the status of a task". |
+| I cannot change the status of another member's task | Pass. API call returned no error and 0 rows (data: []), status unchanged. |
 
-## Expanding the Oxlint configuration
+These API checks were run from the browser console with the Supabase client.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+## Not finished
+- The owner "cannot assign to a non-member" rule is in the database, but I did
+  not test it directly through the API. It was only checked that normal assignment works.
+- profiles_select and pm_select allow any logged-in user to read all profiles
+  and member lists. This should be restricted.
+- Members are added by the frontend (profiles lookup plus insert) instead of a
+  database function.
+- No drag and drop, and no UI to edit or delete tasks.

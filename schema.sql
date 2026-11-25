@@ -1,163 +1,127 @@
--- Step 1: Create profiles table
-create table profiles (
+-- TABLES
+create table public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
-  name text not null,
-  email text not null unique
+  name text not null default '',
+  email text not null
 );
-
--- Step 2: Create projects table
-create table projects (
+create table public.projects (
   id uuid primary key default gen_random_uuid(),
   name text not null,
-  owner_id uuid not null references profiles(id) on delete cascade,
+  owner_id uuid not null references public.profiles(id) on delete cascade,
   created_at timestamptz default now()
 );
-
--- Step 3: Create project_members table
-create table project_members (
-  project_id uuid references projects(id) on delete cascade,
-  user_id uuid references profiles(id) on delete cascade,
+create table public.project_members (
+  project_id uuid not null references public.projects(id) on delete cascade,
+  user_id uuid not null references public.profiles(id) on delete cascade,
   primary key (project_id, user_id)
 );
-
--- Step 4: Create milestones table
-create table milestones (
+create table public.milestones (
   id uuid primary key default gen_random_uuid(),
-  project_id uuid not null references projects(id) on delete cascade,
+  project_id uuid not null references public.projects(id) on delete cascade,
   title text not null,
   planned_date date,
-  status text not null default 'Open' check (status in ('Open', 'Done'))
+  status text not null default 'Open' check (status in ('Open','Done'))
 );
-
--- Step 5: Create tasks table
-create table tasks (
+create table public.tasks (
   id uuid primary key default gen_random_uuid(),
-  milestone_id uuid not null references milestones(id) on delete cascade,
-  project_id uuid not null references projects(id) on delete cascade,
+  milestone_id uuid not null references public.milestones(id) on delete cascade,
+  project_id uuid not null references public.projects(id) on delete cascade,
   title text not null,
-  status text not null default 'Todo' check (status in ('Todo', 'In Progress', 'In Review', 'Done')),
-  priority text not null default 'Medium' check (priority in ('Low', 'Medium', 'High')),
+  status text not null default 'Todo' check (status in ('Todo','In Progress','In Review','Done')),
+  priority text not null default 'Medium' check (priority in ('Low','Medium','High')),
   planned_date date,
-  assigned_to uuid references profiles(id) on delete set null
+  assigned_to uuid references public.profiles(id) on delete set null
 );
 
--- Auto-create profile when user signs up
-create or replace function handle_new_user()
-returns trigger as $$
+-- PROFILE TRIGGER
+create or replace function public.handle_new_user()
+returns trigger language plpgsql security definer set search_path = public as $$
 begin
   insert into profiles (id, name, email)
-  values (
-    new.id,
-    new.raw_user_meta_data->>'name',
-    new.email
-  );
+  values (new.id, coalesce(new.raw_user_meta_data->>'name', split_part(new.email,'@',1)), new.email)
+  on conflict (id) do nothing;
   return new;
-end;
-$$ language plpgsql security definer;
+end; $$;
+create trigger on_auth_user_created after insert on auth.users
+for each row execute function public.handle_new_user();
 
-create trigger on_auth_user_created
-after insert on auth.users
-for each row execute function handle_new_user();
+-- HELPER FUNCTIONS
+create or replace function public.is_project_member(pid uuid)
+returns boolean language sql security definer stable set search_path = public as $$
+  select exists (select 1 from project_members where project_id = pid and user_id = auth.uid());
+$$;
+create or replace function public.is_member_user(pid uuid, uid uuid)
+returns boolean language sql security definer stable set search_path = public as $$
+  select exists (select 1 from project_members where project_id = pid and user_id = uid);
+$$;
 
-
--- Turn on RLS for all tables
+-- RLS
 alter table profiles enable row level security;
 alter table projects enable row level security;
 alter table project_members enable row level security;
 alter table milestones enable row level security;
 alter table tasks enable row level security;
 
--- PROFILES policies
-create policy "Anyone can read profiles"
-  on profiles for select using (true);
+create policy profiles_select on profiles for select using (true);
+create policy profiles_update on profiles for update using (auth.uid() = id);
 
-create policy "Users can update own profile"
-  on profiles for update using (auth.uid() = id);
+create policy projects_select on projects for select to authenticated
+  using (owner_id = auth.uid() or public.is_project_member(id));
+create policy projects_insert on projects for insert with check (owner_id = auth.uid());
+create policy projects_update on projects for update using (owner_id = auth.uid());
+create policy projects_delete on projects for delete using (owner_id = auth.uid());
 
--- PROJECTS policies
-create policy "See own or member projects"
-  on projects for select using (
-    owner_id = auth.uid() or
-    exists (select 1 from project_members where project_id = id and user_id = auth.uid())
-  );
+create policy pm_select on project_members for select using (true);
+create policy pm_insert on project_members for insert
+  with check (project_id in (select id from projects where owner_id = auth.uid()));
+create policy pm_delete on project_members for delete
+  using (project_id in (select id from projects where owner_id = auth.uid()));
 
-create policy "Create project"
-  on projects for insert with check (owner_id = auth.uid());
+create policy milestones_select on milestones for select
+  using (project_id in (select id from projects where owner_id = auth.uid())
+      or project_id in (select project_id from project_members where user_id = auth.uid()));
+create policy milestones_insert on milestones for insert
+  with check (project_id in (select id from projects where owner_id = auth.uid()));
+create policy milestones_update on milestones for update
+  using (project_id in (select id from projects where owner_id = auth.uid()));
+create policy milestones_delete on milestones for delete
+  using (project_id in (select id from projects where owner_id = auth.uid()));
 
-create policy "Owner updates project"
-  on projects for update using (owner_id = auth.uid());
-
-create policy "Owner deletes project"
-  on projects for delete using (owner_id = auth.uid());
-
--- PROJECT_MEMBERS policies
-create policy "See members of own project"
-  on project_members for select using (
-    user_id = auth.uid() or
+create policy tasks_select_owner on tasks for select
+  using (project_id in (select id from projects where owner_id = auth.uid()));
+create policy tasks_select_member on tasks for select
+  using (assigned_to = auth.uid());
+create policy tasks_insert on tasks for insert to authenticated
+  with check (
     exists (select 1 from projects where id = project_id and owner_id = auth.uid())
-  );
-
-create policy "Owner adds members"
-  on project_members for insert with check (
+    and (assigned_to is null or public.is_member_user(project_id, assigned_to)));
+create policy tasks_update_owner on tasks for update to authenticated
+  using (exists (select 1 from projects where id = project_id and owner_id = auth.uid()))
+  with check (
     exists (select 1 from projects where id = project_id and owner_id = auth.uid())
-  );
+    and (assigned_to is null or public.is_member_user(project_id, assigned_to)));
+create policy tasks_update_member on tasks for update
+  using (assigned_to = auth.uid()) with check (assigned_to = auth.uid());
+create policy tasks_delete on tasks for delete
+  using (project_id in (select id from projects where owner_id = auth.uid()));
 
-create policy "Owner removes members"
-  on project_members for delete using (
-    exists (select 1 from projects where id = project_id and owner_id = auth.uid())
-  );
-
--- MILESTONES policies
-create policy "See milestones if in project"
-  on milestones for select using (
-    exists (select 1 from projects where id = project_id and owner_id = auth.uid()) or
-    exists (select 1 from project_members where project_id = milestones.project_id and user_id = auth.uid())
-  );
-
-create policy "Owner manages milestones"
-  on milestones for insert with check (
-    exists (select 1 from projects where id = project_id and owner_id = auth.uid())
-  );
-
-create policy "Owner updates milestones"
-  on milestones for update using (
-    exists (select 1 from projects where id = project_id and owner_id = auth.uid())
-  );
-
-create policy "Owner deletes milestones"
-  on milestones for delete using (
-    exists (select 1 from projects where id = project_id and owner_id = auth.uid())
-  );
-
--- TASKS policies
-create policy "Owner sees all tasks"
-  on tasks for select using (
-    exists (select 1 from projects where id = project_id and owner_id = auth.uid())
-  );
-
-create policy "Member sees own tasks"
-  on tasks for select using (
-    assigned_to = auth.uid()
-  );
-
-create policy "Owner creates tasks"
-  on tasks for insert with check (
-    exists (select 1 from projects where id = project_id and owner_id = auth.uid())
-  );
-
-create policy "Owner updates tasks"
-  on tasks for update using (
-    exists (select 1 from projects where id = project_id and owner_id = auth.uid())
-  );
-
-create policy "Member updates only status"
-  on tasks for update using (
-    assigned_to = auth.uid()
-  ) with check (
-    assigned_to = auth.uid()
-  );
-
-create policy "Owner deletes tasks"
-  on tasks for delete using (
-    exists (select 1 from projects where id = project_id and owner_id = auth.uid())
-  );
+-- MEMBER CAN CHANGE ONLY STATUS
+create or replace function public.enforce_member_status_only()
+returns trigger language plpgsql security definer set search_path = public as $$
+begin
+  if exists (select 1 from projects where id = old.project_id and owner_id = auth.uid()) then
+    return new;
+  end if;
+  if new.id is distinct from old.id
+     or new.project_id is distinct from old.project_id
+     or new.milestone_id is distinct from old.milestone_id
+     or new.title is distinct from old.title
+     or new.priority is distinct from old.priority
+     or new.planned_date is distinct from old.planned_date
+     or new.assigned_to is distinct from old.assigned_to then
+    raise exception 'Members can only change the status of a task';
+  end if;
+  return new;
+end; $$;
+create trigger tasks_member_status_only before update on tasks
+for each row execute function public.enforce_member_status_only();
